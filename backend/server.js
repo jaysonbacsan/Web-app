@@ -5,15 +5,18 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const { Op } = require('sequelize');
 
 // Import models
 const sequelize = require('./config/database');
 const User = require('./models/User');
 const VerificationDocument = require('./models/VerificationDocument');
 const Job = require('./models/Job');
+const JobApplication = require('./models/JobApplication');
 const Notification = require('./models/Notification');
 const Report = require('./models/Report');
 const Payment = require('./models/Payment');
+const Message = require('./models/Message');
 
 const app = express();
 
@@ -43,7 +46,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({ 
     storage: storage,
-    limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+    limits: { fileSize: 10 * 1024 * 1024 }
 });
 
 // Auth middleware
@@ -153,7 +156,8 @@ app.get('/api/profile', auth, async (req, res) => {
             business_name: user.business_name,
             is_verified: user.is_verified,
             verification_status: user.verification_status,
-            rating: user.rating
+            rating: user.rating,
+            profile_image: user.profile_image
         });
     } catch (err) {
         res.status(500).json({ error: err.message });
@@ -169,7 +173,6 @@ app.post('/api/submit-verification', auth, upload.fields([
 ]), async (req, res) => {
     try {
         console.log('📸 Verification submission received');
-        console.log('Files:', req.files);
         
         const user = req.user;
         let verification = await VerificationDocument.findOne({ where: { user_id: user.id } });
@@ -178,7 +181,6 @@ app.post('/api/submit-verification', auth, upload.fields([
             verification = await VerificationDocument.create({ user_id: user.id });
         }
         
-        // Save uploaded files
         if (req.files && req.files['validId']) {
             verification.valid_id_path = req.files['validId'][0].path;
         }
@@ -192,7 +194,6 @@ app.post('/api/submit-verification', auth, upload.fields([
             verification.nbi_clearance_path = req.files['nbiClearance'][0].path;
         }
         
-        // Save skills data
         if (req.body.skills) verification.skills = req.body.skills;
         if (req.body.experience_years) verification.experience_years = req.body.experience_years;
         if (req.body.hourly_rate) verification.hourly_rate = req.body.hourly_rate;
@@ -201,21 +202,8 @@ app.post('/api/submit-verification', auth, upload.fields([
         verification.submitted_at = new Date();
         await verification.save();
         
-        // Update user verification status
         user.verification_status = 'pending';
         await user.save();
-        
-        // COMMENTED OUT - Fix Notification issue later
-        // try {
-        //     await Notification.create({
-        //         user_id: 1,
-        //         title: 'New Verification Request',
-        //         message: `${user.name} has submitted verification documents.`,
-        //         type: 'admin_review'
-        //     });
-        // } catch (notifErr) {
-        //     console.log('Notification error (ignored):', notifErr.message);
-        // }
         
         console.log('✅ Verification submitted successfully for user:', user.name);
         res.json({ success: true, message: 'Documents submitted successfully' });
@@ -225,6 +213,7 @@ app.post('/api/submit-verification', auth, upload.fields([
         res.status(500).json({ error: err.message });
     }
 });
+
 // ========== GET VERIFICATION STATUS ==========
 app.get('/api/verification-status', auth, async (req, res) => {
     try {
@@ -320,6 +309,10 @@ app.get('/api/jobs', auth, async (req, res) => {
 app.put('/api/jobs/:jobId/apply', auth, async (req, res) => {
     try {
         const user = req.user;
+        const jobId = req.params.jobId;
+        const { location_lat, location_lng } = req.body;
+        
+        console.log(`Worker ${user.id} applying for job ${jobId}`);
         
         if (user.role !== 'worker') {
             return res.status(403).json({ error: 'Only workers can apply' });
@@ -329,16 +322,41 @@ app.put('/api/jobs/:jobId/apply', auth, async (req, res) => {
             return res.status(403).json({ error: 'Please complete verification first' });
         }
         
-        const job = await Job.findByPk(req.params.jobId);
+        const job = await Job.findByPk(jobId);
         if (!job) return res.status(404).json({ error: 'Job not found' });
         if (job.status !== 'open') return res.status(400).json({ error: 'Job already taken' });
+        
+        const existingApplication = await JobApplication.findOne({
+            where: { job_id: jobId, worker_id: user.id }
+        });
+        
+        if (existingApplication) {
+            return res.status(400).json({ error: 'You have already applied for this job' });
+        }
+        
+        const application = await JobApplication.create({
+            job_id: job.id,
+            worker_id: user.id,
+            status: 'pending',
+            worker_location_lat: location_lat,
+            worker_location_lng: location_lng,
+            applied_at: new Date()
+        });
         
         job.status = 'taken';
         job.worker_id = user.id;
         await job.save();
         
-        res.json({ success: true, message: 'Applied successfully!' });
+        await Notification.create({
+            user_id: job.client_id,
+            title: 'New Job Application! 📝',
+            message: `${user.name} has applied for your job: ${job.title}`,
+            type: 'application'
+        });
+        
+        res.json({ success: true, message: 'Applied successfully!', application });
     } catch (err) {
+        console.error('Apply error:', err);
         res.status(500).json({ error: err.message });
     }
 });
@@ -394,12 +412,13 @@ app.get('/api/resume/:workerId', auth, async (req, res) => {
     }
 });
 
-// ========== GET NOTIFICATIONS ==========
+// ========== NOTIFICATIONS ==========
 app.get('/api/notifications', auth, async (req, res) => {
     try {
         const notifications = await Notification.findAll({
             where: { user_id: req.userId },
-            order: [['created_at', 'DESC']]
+            order: [['created_at', 'DESC']],
+            limit: 50
         });
         res.json(notifications);
     } catch (err) {
@@ -407,7 +426,42 @@ app.get('/api/notifications', auth, async (req, res) => {
     }
 });
 
-// ========== CREATE REPORT ==========
+app.put('/api/notifications/:id/read', auth, async (req, res) => {
+    try {
+        await Notification.update(
+            { is_read: true },
+            { where: { id: req.params.id, user_id: req.userId } }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.put('/api/notifications/read-all', auth, async (req, res) => {
+    try {
+        await Notification.update(
+            { is_read: true },
+            { where: { user_id: req.userId } }
+        );
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+app.get('/api/notifications/unread-count', auth, async (req, res) => {
+    try {
+        const count = await Notification.count({
+            where: { user_id: req.userId, is_read: false }
+        });
+        res.json({ count });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== REPORTS ==========
 app.post('/api/reports', auth, async (req, res) => {
     try {
         const { reported_id, reason, description } = req.body;
@@ -424,7 +478,7 @@ app.post('/api/reports', auth, async (req, res) => {
     }
 });
 
-// ========== ADMIN: GET ALL USERS ==========
+// ========== ADMIN FUNCTIONS ==========
 app.get('/api/admin/users', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -440,7 +494,6 @@ app.get('/api/admin/users', auth, async (req, res) => {
     }
 });
 
-// ========== ADMIN: VERIFY USER ==========
 app.put('/api/admin/verify-user/:userId', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -462,25 +515,14 @@ app.put('/api/admin/verify-user/:userId', auth, async (req, res) => {
         
         await user.save();
         
-        // Fix: Create notification using raw query or skip for now
-        try {
-            const sequelize = require('./config/database');
-            await sequelize.query(
-                'INSERT INTO notifications (user_id, title, message, type, created_at) VALUES (?, ?, ?, ?, NOW())',
-                {
-                    replacements: [
-                        user.id, 
-                        status === 'approved' ? 'Verification Approved! 🎉' : 'Verification Rejected',
-                        status === 'approved' 
-                            ? 'Your account has been verified! You now have full access.'
-                            : 'Your verification was rejected. Please contact support.',
-                        status === 'approved' ? 'verified' : 'rejected'
-                    ]
-                }
-            );
-        } catch (notifErr) {
-            console.log('Notification error:', notifErr.message);
-        }
+        await Notification.create({
+            user_id: user.id,
+            title: status === 'approved' ? 'Verification Approved! 🎉' : 'Verification Rejected',
+            message: status === 'approved' 
+                ? 'Your account has been verified! You now have full access.'
+                : 'Your verification was rejected. Please contact support.',
+            type: status === 'approved' ? 'verified' : 'rejected'
+        });
         
         res.json({ success: true });
     } catch (err) {
@@ -488,7 +530,6 @@ app.put('/api/admin/verify-user/:userId', auth, async (req, res) => {
     }
 });
 
-// ========== ADMIN: GET PENDING VERIFICATIONS ==========
 app.get('/api/admin/pending-verifications', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -497,24 +538,15 @@ app.get('/api/admin/pending-verifications', auth, async (req, res) => {
         
         const pendingDocs = await VerificationDocument.findAll({
             where: { status: 'pending' },
-            include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email', 'role', 'business_name', 'phone', 'address'] }]
+            include: [{ model: User, as: 'user', attributes: ['id', 'name', 'email', 'role', 'business_name'] }]
         });
         
-        // Convert paths to be URL-friendly
-        const formattedDocs = pendingDocs.map(doc => ({
-            ...doc.toJSON(),
-            valid_id_path: doc.valid_id_path,
-            resume_path: doc.resume_path,
-            business_permit_path: doc.business_permit_path,
-            nbi_clearance_path: doc.nbi_clearance_path
-        }));
-        
-        res.json(formattedDocs);
+        res.json(pendingDocs);
     } catch (err) {
         res.status(500).json({ error: err.message });
     }
 });
-// ========== ADMIN: TOGGLE USER ==========
+
 app.put('/api/admin/users/:userId/toggle', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -532,7 +564,6 @@ app.put('/api/admin/users/:userId/toggle', auth, async (req, res) => {
     }
 });
 
-// ========== ADMIN: DELETE USER ==========
 app.delete('/api/admin/users/:userId', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -546,7 +577,6 @@ app.delete('/api/admin/users/:userId', auth, async (req, res) => {
     }
 });
 
-// ========== ADMIN: GET REPORTS ==========
 app.get('/api/admin/reports', auth, async (req, res) => {
     try {
         if (req.user.role !== 'admin') {
@@ -564,52 +594,43 @@ app.get('/api/admin/reports', auth, async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
 // ========== UPLOAD PROFILE PICTURE ==========
 const profileUpload = multer({ 
     storage: storage,
-    limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+    limits: { fileSize: 5 * 1024 * 1024 },
     fileFilter: (req, file, cb) => {
         const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
         if (allowedTypes.includes(file.mimetype)) {
             cb(null, true);
         } else {
-            cb(new Error('Only images are allowed (jpeg, jpg, png, gif, webp)'));
+            cb(new Error('Only images are allowed'));
         }
     }
 });
 
 app.post('/api/upload-profile-image', auth, profileUpload.single('profileImage'), async (req, res) => {
     try {
-        console.log('Profile upload request received');
-        
         if (!req.file) {
-            console.log('No file in request');
             return res.status(400).json({ error: 'No file uploaded' });
         }
         
         const user = req.user;
         const imagePath = `/uploads/${req.file.filename}`;
         
-        console.log('File saved:', imagePath);
-        console.log('User:', user.name);
-        
-        // Delete old profile image if exists
         if (user.profile_image) {
             const oldPath = path.join(__dirname, user.profile_image);
             if (fs.existsSync(oldPath)) {
                 fs.unlinkSync(oldPath);
-                console.log('Old image deleted:', oldPath);
             }
         }
         
         user.profile_image = imagePath;
         await user.save();
         
-        console.log('Profile image updated for user:', user.name);
-        
         res.json({ 
             success: true, 
-            imageUrl: `http://192.168.68.121:5000${imagePath}` 
+            imageUrl: `http://192.168.68.150:5000${imagePath}`
         });
     } catch (err) {
         console.error('Upload error:', err);
@@ -617,11 +638,33 @@ app.post('/api/upload-profile-image', auth, profileUpload.single('profileImage')
     }
 });
 
+// ========== UPDATE USER LOCATION ==========
+app.post('/api/update-location', auth, async (req, res) => {
+    try {
+        const { latitude, longitude, address } = req.body;
+        const user = req.user;
+        
+        user.location_lat = latitude;
+        user.location_lng = longitude;
+        user.location_address = address;
+        user.last_location_update = new Date();
+        await user.save();
+        
+        res.json({ success: true });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// ========== ASSOCIATIONS ==========
+Job.hasMany(JobApplication, { foreignKey: 'job_id' });
+JobApplication.belongsTo(Job, { foreignKey: 'job_id' });
+JobApplication.belongsTo(User, { as: 'worker', foreignKey: 'worker_id' });
+
 // ========== START SERVER ==========
 sequelize.sync({ alter: true }).then(async () => {
     console.log('✅ Database connected and synced');
     
-    // Create admin if not exists
     let admin = await User.findOne({ where: { role: 'admin' } });
     if (!admin) {
         const hashedPassword = await bcrypt.hash('dole123', 10);
@@ -636,8 +679,6 @@ sequelize.sync({ alter: true }).then(async () => {
             rating: 5.0
         });
         console.log('✅ Admin created: admin@dole.gov.ph / dole123');
-    } else {
-        console.log('✅ Admin already exists');
     }
     
     const PORT = 5000;
@@ -647,4 +688,35 @@ sequelize.sync({ alter: true }).then(async () => {
     });
 }).catch(err => {
     console.error('Database error:', err);
+});
+// ========== GET WORKER'S APPLICATIONS (Worker views jobs they applied for) ==========
+app.get('/api/my-applications', auth, async (req, res) => {
+    try {
+        const user = req.user;
+        
+        if (user.role !== 'worker') {
+            return res.status(403).json({ error: 'Only workers can view their applications' });
+        }
+        
+        const applications = await JobApplication.findAll({
+            where: { worker_id: user.id },
+            include: [
+                { 
+                    model: Job, 
+                    as: 'job',
+                    include: [{ 
+                        model: User, 
+                        as: 'client', 
+                        attributes: ['id', 'name', 'email', 'phone', 'rating', 'business_name'] 
+                    }]
+                }
+            ],
+            order: [['applied_at', 'DESC']]
+        });
+        
+        res.json(applications);
+    } catch (err) {
+        console.error('Error fetching worker applications:', err);
+        res.status(500).json({ error: err.message });
+    }
 });

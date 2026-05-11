@@ -11,12 +11,16 @@ const User = sequelize.define('User', {
     phone: DataTypes.STRING,
     address: DataTypes.TEXT,
     business_name: DataTypes.STRING,
-    profile_image: { type: DataTypes.STRING, allowNull: true }, // ADD THIS LINE
+    profile_image: { type: DataTypes.STRING, allowNull: true },
     is_verified: { type: DataTypes.BOOLEAN, defaultValue: false },
     verification_status: { type: DataTypes.ENUM('pending', 'verified', 'rejected', 'none'), defaultValue: 'none' },
     is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
     rating: { type: DataTypes.DECIMAL(3,2), defaultValue: 0 },
-    total_ratings: { type: DataTypes.INTEGER, defaultValue: 0 }
+    total_ratings: { type: DataTypes.INTEGER, defaultValue: 0 },
+    location_lat: { type: DataTypes.DECIMAL(10,8), allowNull: true },
+    location_lng: { type: DataTypes.DECIMAL(11,8), allowNull: true },
+    location_address: { type: DataTypes.STRING, allowNull: true },
+    last_location_update: { type: DataTypes.DATE, allowNull: true }
 }, {
     tableName: 'users',
     timestamps: true,

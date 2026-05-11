@@ -2,24 +2,17 @@
 node_modules/
 /.pnp
 .pnp.js
-.pnp.*
 
 # Testing
 /coverage
-/.nyc_output
 
 # Production
 /build
 /dist
-/.next
-/out
 
-# Misc
-.DS_Store
+# Environment files
 .env
 .env.local
-.env.development.local
-.env.test.local
 .env.production.local
 
 # Logs
@@ -27,9 +20,8 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 logs
-*.log
 
-# Editor
+# Editor files
 .idea
 .vscode
 *.suo
@@ -38,15 +30,15 @@ logs
 *.sln
 *.sw?
 
-# OS
+# OS files
+.DS_Store
 Thumbs.db
-Desktop.ini
 
 # Uploads (user uploaded files)
 uploads/
-*.jpg
-*.png
-*.pdf
 
-# Backend
+# Backend old
 backend-old/
+
+# Expo
+.expo/
